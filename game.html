@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Field Goal Flick — Stadium</title>
+  <style>
+    :root{
+      --bg:#070b16; --fg:#eaf0ff; --muted:#9ab0df; --line:rgba(255,255,255,.16);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      color:var(--fg);
+      background:
+        radial-gradient(900px 500px at 15% 15%, rgba(122,162,255,.18), transparent 55%),
+        radial-gradient(900px 500px at 85% 25%, rgba(51,209,122,.10), transparent 55%),
+        var(--bg);
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      padding:18px;
+    }
+    .wrap{
+      width:min(980px, 100%);
+      display:grid;
+      grid-template-columns: 1fr 290px;
+      gap:14px;
+    }
+    @media (max-width: 900px){ .wrap{grid-template-columns:1fr} }
+    .card{
+      border:1px solid var(--line);
+      background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+      border-radius:18px;
+      box-shadow: 0 12px 36px rgba(0,0,0,.38);
+      padding:14px;
+    }
+    h1{margin:0 0 6px; font-size:18px}
+    p{margin:0; color:var(--muted); font-size:13px; line-height:1.35}
+    .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px}
+    button{
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.06);
+      color:var(--fg);
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-size:13px;
+    }
+    button:hover{background:rgba(255,255,255,.10)}
+    .pill{
+      border:1px solid var(--line);
+      background:rgba(0,0,0,.22);
+      padding:7px 10px;
+      border-radius:999px;
+      font-size:12px;
+      color:var(--muted);
+    }
+    canvas{
+      width:100%;
+      aspect-ratio: 16/9;
+      background:rgba(0,0,0,.20);
+      border:1px solid var(--line);
+      border-radius:16px;
+      display:block;
+      touch-action:none;
+    }
+    .small{font-size:12px}
+    .kbd{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      border:1px solid var(--line);
+      background:rgba(0,0,0,.25);
+      padding:2px 6px;
+      border-radius:8px;
+      color:rgba(234,240,255,.85);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <canvas id="c" width="960" height="540" aria-label="Field goal game"></canvas>
+    </div>
+
+    <div class="card">
+      <h1>Field Goal Flick — Stadium</h1>
+      <p>Drag the ball back to aim, release to kick. Score if it crosses the posts plane between uprights and above the crossbar.</p>
+
+      <div class="row">
+        <span class="pill" id="scorePill">Score: 0</span>
+        <span class="pill" id="attemptPill">Attempts: 0</span>
+      </div>
+
+      <div class="row">
+        <button id="newBtn">New Try</button>
+        <button id="resetBtn">Reset Ball</button>
+      </div>
+
+      <div class="row">
+        <span class="pill small">Controls: <span class="kbd">drag</span> + <span class="kbd">release</span></span>
+      </div>
+
+      <div class="row">
+        <p class="small" id="msg" style="margin-top:8px;color:var(--muted)"></p>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const scorePill = document.getElementById("scorePill");
+  const attemptPill = document.getElementById("attemptPill");
+  const msgEl = document.getElementById("msg");
+  const resetBtn = document.getElementById("resetBtn");
+  const newBtn = document.getElementById("newBtn");
+
+  // --- World + physics ---
+  const W = canvas.width, H = canvas.height;
+  const G = 900;          // gravity
+  const AIR = 0.995;      // air drag
+  const MAX_PULL = 170;   // easier scoring
+  const POWER = 9.0;      // easier scoring
+
+  // Ground / turf
+  const groundY = H * 0.86;
+
+  // Goal
+  const goalX = W * 0.80;
+  const crossbarY = H * 0.44;
+  const postTopY = H * 0.16;
+  const uprightGap = 130;
+  const postThickness = 10;
+
+  // Tee + ball
+  const tee = { x: W * 0.18, y: groundY - 18 };
+  const ball = { r: 14, x: tee.x, y: tee.y, vx: 0, vy: 0, flying: false };
+
+  // Dragging (reliable release)
+  let dragging = false;
+  let dragPos = { x: tee.x, y: tee.y };
+  let activePointerId = null;
+
+  let score = 0;
+  let attempts = 0;
+  let judgedThisKick = false;
+  let lastTime = performance.now();
+
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist = (ax,ay,bx,by)=>Math.hypot(ax-bx, ay-by);
+
+  function setMsg(t){ msgEl.textContent = t || ""; }
+  function updateHUD(){
+    scorePill.textContent = `Score: ${score}`;
+    attemptPill.textContent = `Attempts: ${attempts}`;
+  }
+
+  function resetBall(){
+    ball.x = tee.x; ball.y = tee.y;
+    ball.vx = 0; ball.vy = 0;
+    ball.flying = false;
+    dragging = false;
+    activePointerId = null;
+    judgedThisKick = false;
+    setMsg("Drag to aim (you can pull below the ground line to angle up).");
+  }
+
+  function newTry(){
+    attempts++;
+    updateHUD();
+    resetBall();
+  }
+
+  function toCanvasPos(evt){
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+      y: (evt.clientY - rect.top) * (canvas.height / rect.height)
+    };
+  }
+
+  // --- Scoring ---
+  function checkFieldGoal(prevX, prevY, x, y){
+    if(judgedThisKick) return;
+    if(prevX < goalX && x >= goalX){
+      const innerLeft = goalX - uprightGap/2;
+      const innerRight = goalX + uprightGap/2;
+
+      const t = (goalX - prevX) / (x - prevX || 1e-6);
+      const yAt = prevY + (y - prevY) * t;
+
+      const between = (x >= innerLeft && x <= innerRight);
+      const above = (yAt <= crossbarY - ball.r * 0.10);
+
+      judgedThisKick = true;
+      if(between && above){
+        score++;
+        updateHUD();
+        setMsg("✅ GOOD! Field goal!");
+      }else{
+        setMsg("❌ No good. New try!");
+      }
+    }
+  }
+
+  // FIXED: launch from tee so it never instantly "hits ground"
+  function kickFromPull(px, py){
+    const dx = px - tee.x, dy = py - tee.y;
+    const d = Math.hypot(dx, dy);
+    const pull = clamp(d, 0, MAX_PULL);
+    const nx = d ? dx/d : 0, ny = d ? dy/d : 0;
+
+    ball.x = tee.x;
+    ball.y = tee.y;
+
+    ball.vx = -nx * pull * POWER;
+    ball.vy = -ny * pull * POWER;
+    ball.flying = true;
+    judgedThisKick = false;
+    setMsg("Ball is up!");
+  }
+
+  // --- Input (window move/up so release always works) ---
+  canvas.addEventListener("pointerdown", (e)=>{
+    if(ball.flying) return;
+    const p = toCanvasPos(e);
+
+    // generous grab radius
+    if(dist(p.x,p.y,ball.x,ball.y) <= ball.r + 28){
+      e.preventDefault();
+      dragging = true;
+      activePointerId = e.pointerId;
+      dragPos = p;
+      if (canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(activePointerId); } catch {}
+      }
+    }
+  });
+
+  window.addEventListener("pointermove", (e)=>{
+    if(!dragging) return;
+    if(activePointerId !== null && e.pointerId !== activePointerId) return;
+    dragPos = toCanvasPos(e);
+  });
+
+  window.addEventListener("pointerup", (e)=>{
+    if(!dragging) return;
+    if(activePointerId !== null && e.pointerId !== activePointerId) return;
+    dragging = false;
+    activePointerId = null;
+    kickFromPull(dragPos.x, dragPos.y);
+  });
+
+  window.addEventListener("pointercancel", ()=>{
+    dragging = false;
+    activePointerId = null;
+  });
+
+  resetBtn.addEventListener("click", resetBall);
+  newBtn.addEventListener("click", newTry);
+
+  // ---------- Stadium drawing ----------
+  function drawSkyAndStadium(){
+    // sky gradient
+    const g = ctx.createLinearGradient(0,0,0,groundY);
+    g.addColorStop(0, "rgba(15,22,55,1)");
+    g.addColorStop(1, "rgba(8,10,22,1)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,groundY);
+
+    // vignette
+    const vg = ctx.createRadialGradient(W*0.5, groundY*0.35, 80, W*0.5, groundY*0.35, W*0.75);
+    vg.addColorStop(0, "rgba(255,255,255,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.45)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,W,groundY);
+
+    // stands base shape
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath();
+    ctx.moveTo(0, groundY*0.15);
+    ctx.lineTo(W, groundY*0.22);
+    ctx.lineTo(W, groundY*0.52);
+    ctx.lineTo(0, groundY*0.45);
+    ctx.closePath();
+    ctx.fill();
+
+    // crowd dots (simple)
+    const crowdTop = groundY*0.22;
+    const crowdBot = groundY*0.48;
+    for(let i=0;i<1200;i++){
+      const x = Math.random()*W;
+      const y = crowdTop + Math.random()*(crowdBot-crowdTop);
+      const a = 0.10 + Math.random()*0.20;
+      ctx.fillStyle = `rgba(234,240,255,${a})`;
+      ctx.fillRect(x, y, 1.5, 1.5);
+    }
+
+    // stadium lights (left + right)
+    drawLightTower(W*0.10, groundY*0.18, 1);
+    drawLightTower(W*0.90, groundY*0.20, -1);
+
+    // soft light beams
+    drawLightBeam(W*0.10, groundY*0.18, 1);
+    drawLightBeam(W*0.90, groundY*0.20, -1);
+  }
+
+  function drawLightTower(x, y, dir){
+    // tower pole
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillRect(x-4, y, 8, groundY-y);
+
+    // light box
+    ctx.fillStyle = "rgba(255,255,255,0.14)";
+    ctx.fillRect(x-22, y-16, 44, 18);
+
+    // bulbs
+    for(let i=0;i<6;i++){
+      ctx.fillStyle = "rgba(255,255,255,0.22)";
+      ctx.fillRect(x-18 + i*6, y-13, 4, 12);
+    }
+
+    // support arm
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y+12);
+    ctx.lineTo(x + dir*50, y+28);
+    ctx.stroke();
+  }
+
+  function drawLightBeam(x, y, dir){
+    const beam = ctx.createLinearGradient(x, y, x + dir*240, groundY);
+    beam.addColorStop(0, "rgba(255,255,255,0.10)");
+    beam.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = beam;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + dir*260, groundY);
+    ctx.lineTo(x + dir*160, groundY);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawField(){
+    // turf base
+    const turf = ctx.createLinearGradient(0, groundY, 0, H);
+    turf.addColorStop(0, "rgba(30,120,70,0.95)");
+    turf.addColorStop(1, "rgba(18,85,52,0.98)");
+    ctx.fillStyle = turf;
+    ctx.fillRect(0, groundY, W, H-groundY);
+
+    // alternating stripes
+    const stripeH = (H-groundY)/8;
+    for(let i=0;i<8;i++){
+      ctx.fillStyle = (i%2===0) ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.04)";
+      ctx.fillRect(0, groundY + i*stripeH, W, stripeH);
+    }
+
+    // end zone near goal
+    const ezX0 = W*0.70;
+    ctx.fillStyle = "rgba(22,40,90,0.22)";
+    ctx.fillRect(ezX0, groundY, W-ezX0, H-groundY);
+
+    // end zone border
+    ctx.strokeStyle = "rgba(234,240,255,0.35)";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(ezX0, groundY, W-ezX0, H-groundY);
+
+    // yard lines
+    ctx.strokeStyle = "rgba(234,240,255,0.18)";
+    ctx.lineWidth = 2;
+    for(let x=W*0.08; x<=W*0.95; x+=W*0.08){
+      ctx.beginPath();
+      ctx.moveTo(x, groundY+8);
+      ctx.lineTo(x, H-10);
+      ctx.stroke();
+
+      // hash marks
+      for(let k=0;k<10;k++){
+        const yy = groundY + 18 + k*((H-groundY-36)/9);
+        ctx.beginPath();
+        ctx.moveTo(x-10, yy);
+        ctx.lineTo(x-2, yy);
+        ctx.stroke();
+      }
+    }
+
+    // ground line highlight
+    ctx.strokeStyle = "rgba(255,255,255,.25)";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(W, groundY); ctx.stroke();
+
+    // tee marker
+    ctx.fillStyle = "rgba(255,255,255,.10)";
+    ctx.beginPath(); ctx.arc(tee.x, tee.y + 10, 10, 0, Math.PI*2); ctx.fill();
+  }
+
+  function drawGoal(){
+    const innerLeft = goalX - uprightGap/2;
+    const innerRight = goalX + uprightGap/2;
+
+    // uprights (crossbar -> top)
+    ctx.fillStyle = "rgba(255, 204, 0, 0.92)";
+    ctx.fillRect(innerLeft - postThickness, postTopY, postThickness, crossbarY - postTopY);
+    ctx.fillRect(innerRight, postTopY, postThickness, crossbarY - postTopY);
+
+    // crossbar
+    ctx.fillRect(innerLeft - postThickness, crossbarY, uprightGap + postThickness*2, postThickness);
+
+    // center post (crossbar -> ground)
+    ctx.fillStyle = "rgba(255, 204, 0, 0.65)";
+    ctx.fillRect(goalX - postThickness/2, crossbarY + postThickness, postThickness, groundY - (crossbarY + postThickness));
+
+    // subtle shadow on turf
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(innerLeft-16, groundY+6, uprightGap+32, 10);
+  }
+
+  function drawAimLine(){
+    if(!dragging || ball.flying) return;
+
+    const dx = dragPos.x - tee.x, dy = dragPos.y - tee.y;
+    const d = Math.hypot(dx, dy);
+    const pull = clamp(d, 0, MAX_PULL);
+
+    const hx = tee.x + (d ? (dx/d)*pull : 0);
+    const hy = tee.y + (d ? (dy/d)*pull : 0);
+
+    // sling line
+    ctx.strokeStyle = "rgba(122,162,255,.80)";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(tee.x, tee.y); ctx.lineTo(hx, hy); ctx.stroke();
+
+    // dotted preview
+    const vx = -(dx/d || 0) * pull * POWER;
+    const vy = -(dy/d || 0) * pull * POWER;
+    ctx.strokeStyle = "rgba(255,255,255,.38)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 8]);
+    ctx.beginPath();
+    let px = tee.x, py = tee.y, tvx=vx, tvy=vy;
+    const dt = 1/60;
+    for(let i=0;i<30;i++){
+      tvy += G*dt;
+      tvx *= AIR; tvy *= AIR;
+      px += tvx*dt; py += tvy*dt;
+      if(i===0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      if(py > groundY) break;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function drawBall(){
+    // simple shadow on turf when near ground
+    if(ball.y + ball.r >= groundY - 6){
+      ctx.fillStyle = "rgba(0,0,0,0.20)";
+      ctx.beginPath();
+      ctx.ellipse(ball.x, groundY + 10, 16, 6, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // football-ish ball
+    ctx.fillStyle = "rgba(190, 120, 65, 0.98)";
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
+
+    // highlight
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath(); ctx.arc(ball.x - 5, ball.y - 5, ball.r*0.55, 0, Math.PI*2); ctx.fill();
+
+    // laces
+    ctx.strokeStyle = "rgba(255,255,255,.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ball.x - 7, ball.y); ctx.lineTo(ball.x + 7, ball.y); ctx.stroke();
+    ctx.lineWidth = 1.5;
+    for(let i=-5;i<=5;i+=5){
+      ctx.beginPath();
+      ctx.moveTo(ball.x + i, ball.y-4);
+      ctx.lineTo(ball.x + i, ball.y+4);
+      ctx.stroke();
+    }
+  }
+
+  // --- Physics (NO BOUNCE) ---
+  function step(dt){
+    const prevX = ball.x, prevY = ball.y;
+
+    // You can drag pointer below ground, but ball can't be dragged into ground.
+    if(dragging && !ball.flying){
+      const dx = dragPos.x - tee.x, dy = dragPos.y - tee.y;
+      const d = Math.hypot(dx, dy);
+      const pull = clamp(d, 0, MAX_PULL);
+
+      let hx = tee.x + (d ? (dx/d)*pull : 0);
+      let hy = tee.y + (d ? (dy/d)*pull : 0);
+
+      const maxBallY = groundY - ball.r;
+      if(hy > maxBallY) hy = maxBallY;
+
+      ball.x = hx;
+      ball.y = hy;
+      return;
+    }
+
+    if(!ball.flying) return;
+
+    ball.vy += G * dt;
+    ball.vx *= AIR;
+    ball.vy *= AIR;
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    checkFieldGoal(prevX, prevY, ball.x, ball.y);
+
+    // Ground hit: stop + reset shortly
+    if(ball.y + ball.r >= groundY){
+      ball.y = groundY - ball.r;
+      ball.vx = 0; ball.vy = 0;
+      ball.flying = false;
+
+      if(!judgedThisKick){
+        setMsg("❌ No good. New try!");
+        judgedThisKick = true;
+      }
+      setTimeout(resetBall, 650);
+    }
+
+    // Out of bounds cleanup
+    if(ball.x < -200 || ball.x > W + 200 || ball.y > H + 220){
+      ball.flying = false;
+      setMsg("Out of bounds. New try!");
+      setTimeout(resetBall, 450);
+    }
+  }
+
+  function loop(t){
+    const dt = Math.min(0.033, (t - lastTime)/1000);
+    lastTime = t;
+
+    step(dt);
+
+    // draw order
+    drawSkyAndStadium();
+    drawField();
+    drawGoal();
+    drawAimLine();
+    drawBall();
+
+    requestAnimationFrame(loop);
+  }
+
+  // Init
+  updateHUD();
+  setMsg("Click “New Try”, then drag to aim.");
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
